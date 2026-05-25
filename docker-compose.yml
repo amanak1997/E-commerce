@@ -1,0 +1,267 @@
+# docker-compose.yml — E-commerce full stack
+# Run:  docker compose up -d
+# UIs:  Mongo Express → http://localhost:8081
+#       Redis Commander → http://localhost:8082
+#       RabbitMQ Mgmt  → http://localhost:15672  (admin / rabbitpass)
+
+services:
+  # ─── Infrastructure ───────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7.0
+    container_name: ecom_mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS:-secret}
+      MONGO_INITDB_DATABASE: ecommerce
+    volumes:
+      - mongodb_data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - ecom_network
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: ecom_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redispass} --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - ecom_network
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: ecom_rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-rabbitpass}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - ecom_network
+
+  # ─── Microservices ────────────────────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: ecom_api_gateway
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redispass}@redis:6379
+      JWT_SECRET: ${JWT_SECRET:-supersecretjwt}
+      AUTH_SERVICE_URL: http://auth-service:3001
+      PRODUCT_SERVICE_URL: http://product-service:3002
+      ORDER_SERVICE_URL: http://order-service:3003
+      PAYMENT_SERVICE_URL: http://payment-service:3004
+      NOTIFICATION_SERVICE_URL: http://notification-service:3005
+    depends_on:
+      - redis
+      - auth-service
+      - product-service
+      - order-service
+      - payment-service
+    networks:
+      - ecom_network
+
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    container_name: ecom_auth_service
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3001
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-secret}@mongodb:27017/ecommerce_auth?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redispass}@redis:6379
+      JWT_SECRET: ${JWT_SECRET:-supersecretjwt}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-superrefreshsecret}
+      JWT_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - ecom_network
+
+  product-service:
+    build:
+      context: ./services/product-service
+      dockerfile: Dockerfile
+    container_name: ecom_product_service
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+      - "50052:50052"   # gRPC
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3002
+      GRPC_PORT: 50052
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-secret}@mongodb:27017/ecommerce_products?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redispass}@redis:6379
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASS:-rabbitpass}@rabbitmq:5672
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - product_uploads:/app/uploads
+      - ./proto:/proto:ro    # gRPC proto files
+    depends_on:
+      - mongodb
+      - redis
+      - rabbitmq
+    networks:
+      - ecom_network
+
+  order-service:
+    build:
+      context: ./services/order-service
+      dockerfile: Dockerfile
+    container_name: ecom_order_service
+    restart: unless-stopped
+    ports:
+      - "3003:3003"
+      - "50053:50053"   # gRPC
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3003
+      GRPC_PORT: 50053
+      PRODUCT_GRPC_HOST: product-service   # Docker service name
+      PRODUCT_GRPC_PORT: 50052
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-secret}@mongodb:27017/ecommerce_orders?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redispass}@redis:6379
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASS:-rabbitpass}@rabbitmq:5672
+      PRODUCT_SERVICE_URL: http://product-service:3002
+      PAYMENT_SERVICE_URL: http://payment-service:3004
+    volumes:
+      - ./proto:/proto:ro    # gRPC proto files
+    depends_on:
+      - mongodb
+      - redis
+      - rabbitmq
+      - product-service
+    networks:
+      - ecom_network
+
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    container_name: ecom_payment_service
+    restart: unless-stopped
+    ports:
+      - "3004:3004"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3004
+      ORDER_GRPC_HOST: order-service    # Docker service name
+      ORDER_GRPC_PORT: 50053
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-secret}@mongodb:27017/ecommerce_payments?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redispass}@redis:6379
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      ORDER_SERVICE_URL: http://order-service:3003
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3006}
+    volumes:
+      - ./proto:/proto:ro    # gRPC proto files
+    depends_on:
+      - mongodb
+      - redis
+      - order-service
+    networks:
+      - ecom_network
+
+  notification-service:
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: ecom_notification_service
+    restart: unless-stopped
+    ports:
+      - "3005:3005"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3005
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redispass}@redis:6379
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASS:-rabbitpass}@rabbitmq:5672
+      SMTP_HOST: ${SMTP_HOST:-smtp.mailtrap.io}
+      SMTP_PORT: ${SMTP_PORT:-2525}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      FROM_EMAIL: ${FROM_EMAIL:-noreply@mystore.com}
+    depends_on:
+      - redis
+      - rabbitmq
+    networks:
+      - ecom_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ecom_frontend
+    restart: unless-stopped
+    ports:
+      - "3006:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3000}
+      NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:3000}
+    depends_on:
+      - api-gateway
+    networks:
+      - ecom_network
+
+  # ─── Monitoring / Admin UIs ───────────────────────────────────────────────────
+  mongo-express:
+    image: mongo-express:latest
+    container_name: ecom_mongo_express
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: ${MONGO_ROOT_USER:-admin}
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_ROOT_PASS:-secret}
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-secret}@mongodb:27017/
+      ME_CONFIG_BASICAUTH: "false"
+    depends_on:
+      - mongodb
+    networks:
+      - ecom_network
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: ecom_redis_commander
+    restart: unless-stopped
+    ports:
+      - "8082:8081"
+    environment:
+      REDIS_HOSTS: local:redis:6379:0:${REDIS_PASSWORD:-redispass}
+    depends_on:
+      - redis
+    networks:
+      - ecom_network
+
+volumes:
+  mongodb_data:
+  redis_data:
+  rabbitmq_data:
+  product_uploads:
+
+networks:
+  ecom_network:
+    driver: bridge

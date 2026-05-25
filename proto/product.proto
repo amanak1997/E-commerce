@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package product;
+
+// ─── Service Definition ───────────────────────────────────────────────────────
+service ProductService {
+  rpc GetProduct    (GetProductRequest)    returns (ProductResponse);
+  rpc DeductStock   (StockChangeRequest)   returns (StockResponse);
+  rpc RestoreStock  (StockChangeRequest)   returns (StockResponse);
+  rpc CheckStock    (CheckStockRequest)    returns (StockResponse);
+}
+
+// ─── Messages ─────────────────────────────────────────────────────────────────
+message GetProductRequest {
+  string product_id = 1;
+}
+
+message ProductResponse {
+  bool   success = 1;
+  string message = 2;
+  string id      = 3;
+  string name    = 4;
+  string slug    = 5;
+  double price   = 6;
+  int32  stock   = 7;
+  string image   = 8;
+  string category= 9;
+}
+
+message StockChangeRequest {
+  string product_id = 1;
+  int32  quantity   = 2;   // always positive — server decides direction
+}
+
+message CheckStockRequest {
+  string product_id = 1;
+  int32  quantity   = 2;
+}
+
+message StockResponse {
+  bool   success      = 1;
+  string message      = 2;
+  int32  current_stock= 3;
+}

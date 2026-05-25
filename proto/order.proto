@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package order;
+
+// ─── Service Definition ───────────────────────────────────────────────────────
+service OrderService {
+  rpc ConfirmPayment (ConfirmPaymentRequest) returns (OrderResponse);
+  rpc GetOrder       (GetOrderRequest)       returns (OrderResponse);
+  rpc FailPayment    (FailPaymentRequest)    returns (OrderResponse);
+}
+
+// ─── Messages ─────────────────────────────────────────────────────────────────
+message ConfirmPaymentRequest {
+  string order_id          = 1;
+  string payment_intent_id = 2;
+}
+
+message FailPaymentRequest {
+  string order_id       = 1;
+  string failure_reason = 2;
+}
+
+message GetOrderRequest {
+  string order_id = 1;
+}
+
+message OrderResponse {
+  bool   success      = 1;
+  string message      = 2;
+  string order_id     = 3;
+  string order_number = 4;
+  string status       = 5;
+  double total        = 6;
+  string user_id      = 7;
+  string user_email   = 8;
+}
